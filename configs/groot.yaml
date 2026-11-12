@@ -1,0 +1,23 @@
+# Real hardware: camera + arm driven by a GR00T policy server.
+engine:
+  uci_path: stockfish
+  skill_level: 5
+
+vision:
+  camera_index: 0
+
+robot:
+  backend: groot
+  max_retries: 2
+  groot:
+    host: localhost          # machine running the GR00T inference server
+    port: 5555
+    action_horizon: 16
+    max_steps_per_primitive: 400
+    instruction_template: "{action} the {color} {piece} on {from_sq} and place it on {to_sq}"
+    robot_io: my_robot.driver:So101IO   # your RobotIO implementation
+    robot_io_kwargs:
+      port: /dev/ttyACM0
+
+game:
+  robot_color: black
