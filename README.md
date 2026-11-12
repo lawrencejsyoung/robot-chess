@@ -93,3 +93,44 @@ src/robot_chess/
 configs/               default.yaml, groot.yaml
 tests/                 engine, planner, vision, sim game, GR00T client
 ```
+
+## Web dashboard (simulation)
+
+An optional dashboard uses the **same `ChessEngine`, `MovePlanner`, vision detector,
+`SimRobot`, and `GameOrchestrator` as the CLI**. There is no separate chess backend.
+Human clicks move simulated physical pieces; the existing camera/vision pipeline
+recognises the move. Robot turns execute and verify each primitive through the
+orchestrator, including its correction/assistance loop. Per-turn records and
+summary metrics appear in the dashboard.
+
+```bash
+pip install -e ".[dev,web]"
+robot-chess-web                       # local interface, port 5000
+# For a cloud development host:
+robot-chess-web --host 0.0.0.0 --port 5000
+# Optional: use existing engine/simulation configuration
+robot-chess-web --config configs/default.yaml
+pytest -q
+```
+
+Visit the server in your development browser. You play white; robot replies are
+automatic. The camera panel displays the actual simulated camera frame. The FEN
+observation tool uses the existing detector's **color occupancy** matching, not
+piece-type recognition, and never changes game state. Promotion defaults to a
+queen; the dashboard API rejects underpromotion because color occupancy cannot
+distinguish promotion piece types (use the CLI for other workflows). A verification
+failure pauses the dashboard until reset rather than retrying a partially executed
+move. Simulation assistance is handled by the existing `SimAssist` and counted in
+metrics; it is not a real human intervention.
+
+The dashboard is simulation-only, even with a hardware YAML config; use the
+existing `robot-chess -c configs/groot.yaml play` workflow for hardware. This is a
+single shared in-memory lab game, without authentication or persistence, intended
+for a trusted development environment. Restart/reset clears history and metrics.
+No hardware drivers, GR00T transport code, or CLI commands are changed by the UI.
+The optional web extra includes all dashboard assets in the Python package.
+
+Dashboard API: `GET /api/state`, `GET /api/camera` (PNG), `POST /api/move`
+(`{"move":"e2e4"}`), `POST /api/robot`, `POST /api/reset`, and
+`POST /api/observe` (`{"fen":"..."}`). `/api/state` includes the current position,
+latest primitives, latest move record, and the existing metrics summary.

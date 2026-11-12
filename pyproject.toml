@@ -18,12 +18,17 @@ dependencies = [
 [project.optional-dependencies]
 groot = ["pyzmq>=25", "msgpack>=1.0"]
 dev = ["pytest>=7"]
+web = ["Flask>=3.1,<4"]
 
 [project.scripts]
 robot-chess = "robot_chess.cli:main"
+robot-chess-web = "robot_chess.web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"robot_chess.web" = ["templates/*.html", "static/*.css", "static/*.js"]
