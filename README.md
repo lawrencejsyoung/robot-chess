@@ -1,61 +1,136 @@
-# Robot Chess
+# robot-chess: a physical AI chess opponent
 
-A physical AI chess opponent prototype coordinating **perception → chess reasoning → embodied action**. Play a complete game against a local engine in a responsive web dashboard and inspect the physical task plan for every robot move.
+A robot that plays over-the-board chess against you. It combines three AI systems:
 
-## Run
+| Role | Component | What it does |
+|---|---|---|
+| **Reasoning** | `engine.py` | Picks the robot's move with Stockfish over UCI, or a built-in alpha-beta searcher if Stockfish isn't installed |
+| **Perception** | `vision/` | Finds the board in the camera image, works out which squares are empty, white or black, and infers your move |
+| **Action** | `robot/` | Breaks a chess move into language-conditioned pick-and-place steps and runs them with an NVIDIA **GR00T** policy |
 
-Python 3.12 or newer:
+`game.py` coordinates the three. After every primitive, **vision checks what the robot did**. If the step failed, the robot plans a correction and retries. If retries run out, it asks you for help. Every move is logged, so you can measure and compare results across runs.
 
-```sh
-cd /workspace/robot-chess
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python app.py
+```
+             ┌─────────────┐   move    ┌──────────────┐  PickPlace[]  ┌──────────────────┐
+  camera ───▶│   vision    │──────────▶│    engine    │──────────────▶│  planner + GR00T │──▶ arm
+             │ occupancy + │  (human)  │ (Stockfish)  │               │  "pick the black │
+             │ legal-move  │           └──────────────┘               │  knight on g8 …" │
+             │  matching   │◀──────────── verify after each primitive ─┴──────────────────┘
+             └─────────────┘                 │ mismatch → correction / retry / ask human
+                                             ▼
+                                     metrics (JSONL + summary)
 ```
 
-Open port 5000 in your development environment. Run tests with `.venv/bin/python -m pytest -q`.
+## Quickstart (simulation, no hardware)
 
-The default engine is a local depth-three alpha-beta material search. Set `STOCKFISH_PATH` to an installed Stockfish executable to use its UCI engine instead. No API keys or external services are required for simulation. White is human, black is AI; promotion in the dashboard automatically selects a queen (the API accepts other promotion choices).
+The whole stack runs in simulation. A renderer draws the board as a tilted camera would see it, and the same vision code that runs on hardware reads it. A simulated robot moves pieces and fails at a rate you choose: it can miss a grasp or drop a piece on the wrong square. The orchestrator only finds those failures through vision.
 
-## What works
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"          # add ".[groot]" for the real GR00T client
+pytest -q
 
-- Legal move validation, check, checkmate, draws and move history using python-chess.
-- An engine response for each human move, with a retry button if a turn fails.
-- Physical task planning for transfers, captured pieces, en passant, castling and promotion.
-- FEN observations checked against the current occupancy and all legal next positions without mutating game state.
-- Responsive dashboard with legal destination highlights and a readable action plan.
+# 10 games against a random-move "human", 10% robot failure rate per primitive
+robot-chess benchmark --games 10 --failure-rate 0.1
 
-## Camera and GR00T 2 integration
-
-**This is a simulation, not an integrated robot controller.** No camera recognition or GR00T inference is bundled. An embodied policy is hardware-specific; do not send these symbolic tasks directly to motors. The UI identifies both integrations as disconnected.
-
-A camera integration should calibrate the board plane and orientation, classify pieces on each square, and send a full FEN to `POST /api/observe` as `{"fen":"..."}`. The endpoint returns `synchronized` and `matches` (legal UCI moves explaining the occupancy). A vision controller must require one stable, unique match and confidence thresholds before submitting it to `/api/move`. FEN side-to-move fields are not inferred by image recognition; the coordinator owns game state. The current observation endpoint compares occupancy only.
-
-`plan_move` in `app.py` is the GR00T 2 adapter boundary. It emits ordered symbolic tasks:
-
-```json
-[
-  {"action":"transfer","from":"e7","to":"e5"},
-  {"action":"verify","expected_fen":"..."}
-]
+# Play against it yourself in the simulator (type moves as SAN or UCI)
+robot-chess play --sim
 ```
 
-An external deployment should map board squares and capture trays to calibrated poses, attach camera/proprioception observations, and translate tasks into the input schema of its installed NVIDIA Isaac GR00T policy runtime. It needs the appropriate model checkpoint, embodiment configuration, GPU runtime, robot drivers and a calibrated grasp/release policy. This project deliberately does not invent an inference API or assume a compatible checkpoint.
+## Measurable results
 
-Before enabling hardware, implement an acknowledged execution loop: observe → validate human move → plan AI move → execute with workspace bounds and emergency stop → verify observed board → commit game state. **The simulator commits immediately**; use a separate pending/acknowledged state machine for hardware, with timeouts and recovery for failed grasps. Promotion currently requires physical piece replacement. Test captures, castling and recovery on the actual rig before autonomous play.
+Each game writes `runs/<name>/game-NNN.jsonl` (one record per ply) and a `.summary.json`. A benchmark also writes `benchmark.json`:
 
-## API
+| Metric | Meaning |
+|---|---|
+| `robot_first_try_rate` | Share of robot moves completed with no corrections and no human help |
+| `robot_autonomous_rate` | Share of robot moves vision-verified without human help (corrections allowed) |
+| `corrections_per_robot_move` | Self-recoveries the verify loop triggered per move |
+| `human_assists` | Times the robot gave up and asked you to fix the board |
+| `mean_execution_time_s` | Wall time to physically carry out a move |
+| `detection_accuracy` | Share of human moves vision identified correctly (ground truth only exists in sim) |
+| `mean_detection_latency_s` | Time from your move to the robot recognising it |
+| `mean_engine_time_s`, `score_cp` | Reasoning cost and evaluation |
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/state` | Position, legal moves, engine, history, latest plan |
-| `POST /api/move` | Submit human UCI move: `{"move":"e2e4"}` |
-| `POST /api/robot` | Plan and apply a simulated black move |
-| `POST /api/observe` | Validate external FEN observation |
-| `POST /api/reset` | Start a new game |
+Example: `robot-chess benchmark --games 2 --max-plies 40 --failure-rate 0.15` gives a first-try rate of about 0.85, an autonomous rate of 1.0 and detection accuracy of 1.0. Use these numbers as a sim baseline, then compare them with hardware runs and with policy checkpoints.
 
-This development server holds one shared game in memory. Restarting clears it. It has no authentication or persistence and is intended for a local lab session, not a public multi-user service. Fonts have local fallbacks and no external access is needed for chess behavior.
+## How it works
 
-## Cloud development
+**Vision.** `robot-chess calibrate` finds the 7×7 inner corners of an *empty* board, computes a homography to a top-down view, and saves an empty-board reference image. Each square's centre crop is compared with that reference: pixels that differ belong to a piece, and their brightness separates white from black. Occupancy alone can't tell a knight from a bishop, and it doesn't need to. The detector looks for the **legal move** whose resulting occupancy matches what the camera sees, so castling, en passant and captures are handled without extra code. It only trusts a reading after several identical frames in a row, so a hand passing over the board doesn't count as a move. If you need more robustness, `OccupancyClassifier` can be swapped for a small CNN with the same interface.
 
-Use the existing checkout: each cloud task is already isolated; do not create a Git worktree unless requested. Dependencies persist in `.venv`; restart the server in each new task. Readiness: `GET /api/state` should return the starting position and 20 legal moves. Run the test suite before changes and after modifications to coordination logic.
+**Planning.** `MovePlanner` turns a move into ordered `PickPlace(piece, src, dst)` steps. A capture removes the victim to its graveyard first. Castling moves the king, then the rook. En passant removes the pawn beside the destination. Promotion sends the pawn to the graveyard and brings a queen from the reserve.
+
+**Action (GR00T).** `GrootRobot` turns each primitive into an instruction such as *"pick the black knight on g8 and place it on f6"*. It then runs the usual VLA loop: send camera frames, proprioception and the instruction to the GR00T inference server, run `action_horizon` steps of the returned action chunk, and repeat until the arm reports the step is done. Two parts are pluggable:
+
+- `RobotIO`: your arm, gripper and camera driver (`get_images`, `get_state`, `apply_action`, `primitive_done`, `home`)
+- `PolicyTransport`: `ZmqPolicyTransport` uses the GR00T inference service's request/response pattern (`get_action` over ZMQ with msgpack). Observation and action key names, and the serialisation format, vary between GR00T releases. Check them against the server you deploy and subclass if they differ.
+
+## Running on hardware
+
+1. **Rig:** a tabletop arm (for example SO-101 or Franka) and a fixed camera behind White with the whole board in view. Add a wrist camera if your policy uses one. Pick a piece set that contrasts with both square colours.
+2. **Collect demos:** teleoperate pick-and-place episodes for every square, piece type and off-board zone (`graveyard_white`, `graveyard_black`, `reserve`). Label each one with the same instruction template the robot will use (`robot.groot.instruction_template`).
+3. **Fine-tune GR00T** on that dataset and start its inference server.
+4. **Calibrate:** `robot-chess calibrate` with the board empty. Open `calibration_preview.png` and check that a1 is at the bottom-left. If it isn't, re-run with `--rotate 1..3`.
+5. **Play:** set `robot.groot.robot_io` in `configs/groot.yaml` to your driver class, then:
+
+```bash
+robot-chess -c configs/groot.yaml play
+```
+
+## Layout
+
+```
+src/robot_chess/
+  engine.py            Stockfish / built-in search
+  vision/              camera, calibration, occupancy, move detection
+  robot/planner.py     move → PickPlace primitives
+  robot/groot_client.py  GR00T closed-loop client (ZMQ)
+  robot/sim.py         simulated robot with failure injection
+  game.py              orchestrator: turns, verify/correct/assist loop
+  metrics.py           per-move records, summaries, aggregation
+  simulation.py        wiring for sim games and benchmarks
+  cli.py               robot-chess {play,calibrate,benchmark}
+configs/               default.yaml, groot.yaml
+tests/                 engine, planner, vision, sim game, GR00T client
+```
+
+## Web dashboard (simulation)
+
+An optional dashboard uses the **same `ChessEngine`, `MovePlanner`, vision detector,
+`SimRobot`, and `GameOrchestrator` as the CLI**. There is no separate chess backend.
+Human clicks move simulated physical pieces; the existing camera/vision pipeline
+recognises the move. Robot turns execute and verify each primitive through the
+orchestrator, including its correction/assistance loop. Per-turn records and
+summary metrics appear in the dashboard.
+
+```bash
+pip install -e ".[dev,web]"
+robot-chess-web                       # local interface, port 5000
+# For a cloud development host:
+robot-chess-web --host 0.0.0.0 --port 5000
+# Optional: use existing engine/simulation configuration
+robot-chess-web --config configs/default.yaml
+pytest -q
+```
+
+Visit the server in your development browser. You play white; robot replies are
+automatic. The camera panel displays the actual simulated camera frame. The FEN
+observation tool uses the existing detector's **color occupancy** matching, not
+piece-type recognition, and never changes game state. Promotion defaults to a
+queen; the dashboard API rejects underpromotion because color occupancy cannot
+distinguish promotion piece types (use the CLI for other workflows). A verification
+failure pauses the dashboard until reset rather than retrying a partially executed
+move. Simulation assistance is handled by the existing `SimAssist` and counted in
+metrics; it is not a real human intervention.
+
+The dashboard is simulation-only, even with a hardware YAML config; use the
+existing `robot-chess -c configs/groot.yaml play` workflow for hardware. This is a
+single shared in-memory lab game, without authentication or persistence, intended
+for a trusted development environment. Restart/reset clears history and metrics.
+No hardware drivers, GR00T transport code, or CLI commands are changed by the UI.
+The optional web extra includes all dashboard assets in the Python package.
+
+Dashboard API: `GET /api/state`, `GET /api/camera` (PNG), `POST /api/move`
+(`{"move":"e2e4"}`), `POST /api/robot`, `POST /api/reset`, and
+`POST /api/observe` (`{"fen":"..."}`). `/api/state` includes the current position,
+latest primitives, latest move record, and the existing metrics summary.

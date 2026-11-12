@@ -1,0 +1,24 @@
+# Default configuration. Every key is optional; see src/robot_chess/config.py.
+engine:
+  uci_path: stockfish      # set to null to force the built-in searcher
+  think_time_s: 0.5
+  skill_level: 10          # Stockfish 0-20
+  fallback_depth: 2
+
+vision:
+  camera_index: 0
+  calibration_file: calibration.json
+  empty_reference: empty_reference.png
+  warp_size_px: 640
+  roi_fraction: 0.6
+  occupancy_threshold: 18.0
+  stable_frames: 3
+
+robot:
+  backend: sim
+  max_retries: 2
+  sim_failure_rate: 0.1
+
+game:
+  robot_color: black
+  log_dir: runs

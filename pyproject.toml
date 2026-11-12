@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-chess"
+version = "0.1.0"
+description = "A physical AI chess opponent: chess engine + vision + GR00T embodied policy"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "chess>=1.10",
+  "numpy>=1.24",
+  "opencv-python-headless>=4.8",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+groot = ["pyzmq>=25", "msgpack>=1.0"]
+dev = ["pytest>=7"]
+web = ["Flask>=3.1,<4"]
+
+[project.scripts]
+robot-chess = "robot_chess.cli:main"
+robot-chess-web = "robot_chess.web:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"robot_chess.web" = ["templates/*.html", "static/*.css", "static/*.js"]
